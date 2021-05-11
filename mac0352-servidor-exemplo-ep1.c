@@ -76,13 +76,11 @@ struct mqttResponsePacket {
     int packetLength;
 };
 
-struct mqttPacketFixedHeader *getPacketInfo(char headerFirstByte, char headerSecondByte) {
-    struct mqttPacketFixedHeader *info;
+struct mqttPacketFixedHeader *currentPacketInfo;
 
-    info = malloc(sizeof(struct mqttPacketFixedHeader));
-    info->packetType = (int) headerFirstByte >> 4;
-    info->remainingLength = (int) headerSecondByte;
-    return info;
+void getPacketInfo(char headerFirstByte, char headerSecondByte) {
+    currentPacketInfo->packetType = (int) headerFirstByte >> 4;
+    currentPacketInfo->remainingLength = (int) headerSecondByte;
 }
 
 char *generateClientId(){
@@ -132,7 +130,7 @@ struct mqttResponsePacket *formatConnackResponse() {
     return response;
 }
 
-struct mqttResponsePacket *handleConnectRequest(char *packet, int packetLength) {
+struct mqttResponsePacket *handleConnectRequest(char *packet) {
     char protocolName[4];
     int protocolVersion;
 
@@ -140,6 +138,28 @@ struct mqttResponsePacket *handleConnectRequest(char *packet, int packetLength) 
     protocolVersion = (int) packet[8];
     printf("protocol %s version %d\n", protocolName, protocolVersion);
     return formatConnackResponse();
+}
+
+void handlePublishRequest(char *packet) {
+    enum publishPacketBytesDisposition {
+        TOPIC_LEN_POS_1 = 2,
+        TOPIC_LEN_POS_2,
+        TOPIC_POS,
+        PROPERTIES_LEN_POS,
+    };
+    int topicLen, messageLen, messagePos;
+    char *topic, *message;
+
+    topicLen = (int)packet[TOPIC_LEN_POS_1] + (int)packet[TOPIC_LEN_POS_2];
+    topic = malloc(sizeof(char) * (topicLen + 1));
+    strncpy(topic, packet + TOPIC_POS, topicLen); topic[topicLen] = '\0';
+
+    messageLen = currentPacketInfo->remainingLength - 2 - topicLen - 1; 
+    message = malloc(sizeof(char) * (messageLen + 1));
+    messagePos = currentPacketInfo->remainingLength - messageLen + 2;
+    strncpy(message, packet + messagePos, messageLen); message[messageLen] = '\0';
+
+    printf("topic '%s', message len %d and message '%s' and messagePos %d \n", topic, messageLen, message, messagePos);
 }
 
 int main (int argc, char **argv) {
@@ -252,15 +272,32 @@ int main (int argc, char **argv) {
             /* ========================================================= */
             /* TODO: É esta parte do código que terá que ser modificada
              * para que este servidor consiga interpretar comandos MQTT  */
-            struct mqttPacketFixedHeader *currentPacketInfo;
             struct mqttResponsePacket *response;
+            int isConnected = 1;
+            currentPacketInfo = malloc(sizeof(struct mqttPacketFixedHeader));
 
-            while ((n=read(connfd, recvline, MAXLINE)) > 0) {
-                currentPacketInfo = getPacketInfo(recvline[PACKET_TYPE], recvline[PACKET_REM_LEN]);
+            while ((n=read(connfd, recvline, MAXLINE)) > 0 && isConnected) {
+                getPacketInfo(recvline[PACKET_TYPE], recvline[PACKET_REM_LEN]);
                 recvline[n]=0;
-                if (currentPacketInfo->packetType == CONNECT) 
-                    response = handleConnectRequest(recvline, currentPacketInfo->remainingLength + 2);
-                write(connfd, response->packet, response->packetLength);
+
+                switch (currentPacketInfo->packetType) {
+                    case CONNECT:
+                        response = handleConnectRequest(recvline);
+                        break;
+
+                    case PUBLISH:
+                        handlePublishRequest(recvline);
+                        break;
+
+                    case DISCONNECT:
+                        isConnected = 0;
+                        break;
+
+                }
+                if (response != NULL) {
+                    write(connfd, response->packet, response->packetLength);
+                    free(response);
+                }
             }
             /* ========================================================= */
             /* ========================================================= */

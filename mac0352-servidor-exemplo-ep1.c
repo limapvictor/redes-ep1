@@ -44,6 +44,104 @@
 #define MAXDATASIZE 100
 #define MAXLINE 4096
 
+#define PACKET_TYPE 0
+#define PACKET_REM_LEN 1
+
+#define ID_LEN 10
+
+enum mqttPacketType {
+    CONNECT = 1,
+    CONNACK,
+    PUBLISH,
+    PUBACK,
+    PUBREC,
+    PUBREL,
+    PUBCOMP,
+    SUBSCRIBE,
+    SUBACK,
+    UNSUBSCRIBE,
+    UNSUBACK,
+    PINGREQ,
+    PINGRESP,
+    DISCONNECT
+};
+
+struct mqttPacketFixedHeader {
+    short int packetType;
+    short int remainingLength;
+};
+
+struct mqttResponsePacket {
+    char *packet;
+    int packetLength;
+};
+
+struct mqttPacketFixedHeader *getPacketInfo(char headerFirstByte, char headerSecondByte) {
+    struct mqttPacketFixedHeader *info;
+
+    info = malloc(sizeof(struct mqttPacketFixedHeader));
+    info->packetType = (int) headerFirstByte >> 4;
+    info->remainingLength = (int) headerSecondByte;
+    return info;
+}
+
+char *generateClientId(){
+    char *id;
+
+    id = malloc(sizeof(char) * (ID_LEN + 1));
+    srand(time(NULL));
+    for (int i = 0; i < ID_LEN; i++) {
+        id[i] = (char) (97 + (rand() % 26));
+    }
+    id[ID_LEN] = 0;
+    return id;
+}
+
+struct mqttResponsePacket *formatConnackResponse() {
+    enum connackPacketBytesDisposition {
+        ACK_FLAGS_POS = 2,
+        REASON_CODE_POS,
+        PROPERTIES_LEN_POS,
+        ASSIGN_CLIENT_IDENTIFIER_POS,
+        ID_LEN_POS_1,
+        ID_LEN_POS_2,
+        ID_POS
+    };
+    const int SUCCESS_REASON_CODE = 0x00, SUCCESS_ACK_FLAGS = 0, 
+        ASSIGN_CLIENT_IDENTIFIER_CODE = 0x12, 
+        PROPERTIES_LEN = 3 + ID_LEN, PACKET_LEN = 2 + 2 + 1 + PROPERTIES_LEN;
+    char packet[PACKET_LEN];
+    struct mqttResponsePacket *response;
+
+    // Fixed header do pacote de tipo CONNACK 
+    packet[PACKET_TYPE] = CONNACK << 4;
+    packet[PACKET_REM_LEN] = PACKET_LEN - 2;
+
+    // Variable header do pacote de tipo CONNACK
+    packet[ACK_FLAGS_POS] = SUCCESS_ACK_FLAGS;
+    packet[REASON_CODE_POS] = SUCCESS_REASON_CODE;
+    
+    // Properties do pacote do tipo CONNACK
+    packet[PROPERTIES_LEN_POS] = PROPERTIES_LEN;
+    packet[ASSIGN_CLIENT_IDENTIFIER_POS] = ASSIGN_CLIENT_IDENTIFIER_CODE;
+    packet[ID_LEN_POS_1] = 0; packet[ID_LEN_POS_2] = ID_LEN;
+    strncpy(packet + ID_POS, generateClientId(), ID_LEN);
+
+    response = malloc(sizeof(struct mqttResponsePacket));
+    response->packet = packet; response->packetLength = PACKET_LEN;
+    return response;
+}
+
+struct mqttResponsePacket *handleConnectRequest(char *packet, int packetLength) {
+    char protocolName[4];
+    int protocolVersion;
+
+    strncpy(protocolName, packet + 4, sizeof(protocolName));
+    protocolVersion = (int) packet[8];
+    printf("protocol %s version %d\n", protocolName, protocolVersion);
+    return formatConnackResponse();
+}
+
 int main (int argc, char **argv) {
     /* Os sockets. Um que será o socket que vai escutar pelas conexões
      * e o outro que vai ser o socket específico de cada conexão */
@@ -154,14 +252,15 @@ int main (int argc, char **argv) {
             /* ========================================================= */
             /* TODO: É esta parte do código que terá que ser modificada
              * para que este servidor consiga interpretar comandos MQTT  */
+            struct mqttPacketFixedHeader *currentPacketInfo;
+            struct mqttResponsePacket *response;
+
             while ((n=read(connfd, recvline, MAXLINE)) > 0) {
+                currentPacketInfo = getPacketInfo(recvline[PACKET_TYPE], recvline[PACKET_REM_LEN]);
                 recvline[n]=0;
-                printf("[Cliente conectado no processo filho %d enviou:] ",getpid());
-                if ((fputs(recvline,stdout)) == EOF) {
-                    perror("fputs :( \n");
-                    exit(6);
-                }
-                write(connfd, recvline, strlen(recvline));
+                if (currentPacketInfo->packetType == CONNECT) 
+                    response = handleConnectRequest(recvline, currentPacketInfo->remainingLength + 2);
+                write(connfd, response->packet, response->packetLength);
             }
             /* ========================================================= */
             /* ========================================================= */

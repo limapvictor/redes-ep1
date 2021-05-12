@@ -67,8 +67,8 @@ enum mqttPacketType {
 };
 
 struct mqttPacketFixedHeader {
-    short int packetType;
-    short int remainingLength;
+    uint8_t packetType;
+    uint8_t remainingLength;
 };
 
 struct mqttResponsePacket {
@@ -79,8 +79,8 @@ struct mqttResponsePacket {
 struct mqttPacketFixedHeader *currentPacketInfo;
 
 void getPacketInfo(char headerFirstByte, char headerSecondByte) {
-    currentPacketInfo->packetType = (int) headerFirstByte >> 4;
-    currentPacketInfo->remainingLength = (int) headerSecondByte;
+    currentPacketInfo->packetType = (uint8_t) headerFirstByte >> 4;
+    currentPacketInfo->remainingLength = (uint8_t) headerSecondByte;
 }
 
 char *generateClientId(){
@@ -145,7 +145,6 @@ void handlePublishRequest(char *packet) {
         TOPIC_LEN_POS_1 = 2,
         TOPIC_LEN_POS_2,
         TOPIC_POS,
-        PROPERTIES_LEN_POS,
     };
     int topicLen, messageLen, messagePos;
     char *topic, *message;
@@ -160,6 +159,69 @@ void handlePublishRequest(char *packet) {
     strncpy(message, packet + messagePos, messageLen); message[messageLen] = '\0';
 
     printf("topic '%s', message len %d and message '%s' and messagePos %d \n", topic, messageLen, message, messagePos);
+}
+
+struct mqttResponsePacket *formatSubackResponse(short int messageIdentifier) {
+    enum subackPacketBytesDisposition {
+        MSG_IDENTIFIER_POS_1 = 2,
+        MSG_IDENTIFIER_POS_2,
+        PROPERTIES_LEN_POS,
+        REASON_CODE_POS,
+    };
+    const int SUCCESS_REASON_CODE = 0x00, PACKET_LEN = 6;
+    char packet[PACKET_LEN];
+    struct mqttResponsePacket *response;
+
+    // Fixed header do pacote de tipo SUBACK 
+    packet[PACKET_TYPE] = SUBACK << 4;
+    packet[PACKET_REM_LEN] = PACKET_LEN - 2;
+
+    // Variable header do pacote de tipo SUBACK
+    messageIdentifier = htons(messageIdentifier);
+    memcpy(packet + MSG_IDENTIFIER_POS_1, (void *) &messageIdentifier, 2);
+    packet[PROPERTIES_LEN_POS] = 0;
+
+    // Payload do pacote de tipo SUBACK
+    packet[REASON_CODE_POS] = SUCCESS_REASON_CODE;
+
+    response = malloc(sizeof(struct mqttResponsePacket));
+    response->packet = packet; response->packetLength = PACKET_LEN;
+    return response;
+}
+
+struct mqttResponsePacket *handleSubscribeRequest(char *packet) {
+    enum subscribePacketBytesDisposition {
+        MSG_IDENTIFIER_POS_1 = 2,
+        MSG_IDENTIFIER_POS_2,
+        PROPERTIES_LEN_POS,
+        TOPIC_LEN_POS_1,
+        TOPIC_LEN_POS_2,
+        TOPIC_POS,
+    };
+    int topicLen, messageIdentifier;
+    char *topic;
+
+    messageIdentifier = (int)packet[MSG_IDENTIFIER_POS_1] + (int)packet[MSG_IDENTIFIER_POS_2];
+    
+    topicLen = (int)packet[TOPIC_LEN_POS_1] + (int)packet[TOPIC_LEN_POS_2];
+    topic = malloc(sizeof(char) * (topicLen + 1));
+    strncpy(topic, packet + TOPIC_POS, topicLen); topic[topicLen] = '\0';
+
+    printf("topic '%s', message identifier %d\n", topic, messageIdentifier);
+    return formatSubackResponse(messageIdentifier);
+}
+
+struct mqttResponsePacket *handlePingRequest() {
+    struct mqttResponsePacket *response;
+    char packet[2];
+
+    // Fixed header do pacote de tipo PINGRESP 
+    packet[PACKET_TYPE] = PINGRESP << 4;
+    packet[PACKET_REM_LEN] = 0;
+
+    response = malloc(sizeof(struct mqttResponsePacket));
+    response->packet = packet; response->packetLength = 2;
+    return response;
 }
 
 int main (int argc, char **argv) {
@@ -287,6 +349,14 @@ int main (int argc, char **argv) {
 
                     case PUBLISH:
                         handlePublishRequest(recvline);
+                        break;
+
+                    case SUBSCRIBE:
+                        response = handleSubscribeRequest(recvline);
+                        break;
+
+                    case PINGREQ:
+                        response = handlePingRequest();
                         break;
 
                     case DISCONNECT:

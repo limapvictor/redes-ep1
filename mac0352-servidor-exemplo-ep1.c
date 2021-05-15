@@ -40,6 +40,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <fcntl.h>
+
 #define LISTENQ 1
 #define MAXDATASIZE 100
 #define MAXLINE 4096
@@ -335,38 +337,42 @@ int main (int argc, char **argv) {
             /* TODO: É esta parte do código que terá que ser modificada
              * para que este servidor consiga interpretar comandos MQTT  */
             struct mqttResponsePacket *response;
-            int isConnected = 1;
             currentPacketInfo = malloc(sizeof(struct mqttPacketFixedHeader));
+            
+            int flags = fcntl(connfd, F_GETFL, 0); fcntl(connfd, F_SETFL, flags | O_NONBLOCK);
+            int isClientConnected = 1;
 
-            while ((n=read(connfd, recvline, MAXLINE)) > 0 && isConnected) {
-                getPacketInfo(recvline[PACKET_TYPE], recvline[PACKET_REM_LEN]);
-                recvline[n]=0;
+            while (isClientConnected) {
+                if ((n=read(connfd, recvline, MAXLINE)) > 0) {
+                    getPacketInfo(recvline[PACKET_TYPE], recvline[PACKET_REM_LEN]);
+                    recvline[n]=0;
 
-                switch (currentPacketInfo->packetType) {
-                    case CONNECT:
-                        response = handleConnectRequest(recvline);
-                        break;
+                    switch (currentPacketInfo->packetType) {
+                        case CONNECT:
+                            response = handleConnectRequest(recvline);
+                            break;
 
-                    case PUBLISH:
-                        handlePublishRequest(recvline);
-                        break;
+                        case PUBLISH:
+                            handlePublishRequest(recvline);
+                            break;
 
-                    case SUBSCRIBE:
-                        response = handleSubscribeRequest(recvline);
-                        break;
+                        case SUBSCRIBE:
+                            response = handleSubscribeRequest(recvline);
+                            break;
 
-                    case PINGREQ:
-                        response = handlePingRequest();
-                        break;
+                        case PINGREQ:
+                            response = handlePingRequest();
+                            break;
 
-                    case DISCONNECT:
-                        isConnected = 0;
-                        break;
+                        case DISCONNECT:
+                            isClientConnected = 0;
+                            break;
 
-                }
-                if (response != NULL) {
-                    write(connfd, response->packet, response->packetLength);
-                    free(response);
+                    }
+                    if (response != NULL) {
+                        write(connfd, response->packet, response->packetLength);
+                        free(response);
+                    }
                 }
             }
             /* ========================================================= */

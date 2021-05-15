@@ -54,6 +54,8 @@
 
 #define ID_LEN 10
 
+const char SERVER_DIR[] = "/tmp/mqtt-server/";
+
 enum mqttPacketType {
     CONNECT = 1,
     CONNACK,
@@ -83,6 +85,7 @@ struct mqttResponsePacket {
 
 struct mqttPacketFixedHeader currentPacketInfo;
 struct mqttResponsePacket response;
+char *clientId;
 
 void getPacketInfo(char headerFirstByte, char headerSecondByte) {
     currentPacketInfo.packetType = (uint8_t) headerFirstByte >> 4;
@@ -128,7 +131,8 @@ void formatConnackResponse() {
     packet[PROPERTIES_LEN_POS] = PROPERTIES_LEN;
     packet[ASSIGN_CLIENT_IDENTIFIER_POS] = ASSIGN_CLIENT_IDENTIFIER_CODE;
     packet[ID_LEN_POS_1] = 0; packet[ID_LEN_POS_2] = ID_LEN;
-    strncpy(packet + ID_POS, generateClientId(), ID_LEN);
+    clientId = generateClientId();
+    strncpy(packet + ID_POS, clientId, ID_LEN);
 
     response.packet = packet; response.packetLength = PACKET_LEN;
 }
@@ -149,7 +153,7 @@ void sentMessageToSubscribers(char *message, int messageLen, char *topic, int to
     int sockfd;
     struct sockaddr_un subscriberaddr;
 
-    serverDir = opendir("/tmp/mqtt-server");
+    serverDir = opendir(SERVER_DIR);
     if (serverDir) {
         while ((currentFile = readdir(serverDir)) != NULL) {
             if (strncmp(currentFile->d_name, topic, topicLen) == 0) {
@@ -193,6 +197,39 @@ void handlePublishRequest(char *packet) {
 
     printf("topic '%s', message len %d and message '%s' and messagePos %d \n", topic, messageLen, message, messagePos);
     sentMessageToSubscribers(message, messageLen, topic, topicLen);
+}
+
+char *getSubscriberWatcherPath(char *topic, int topicLen) {
+    char *path;
+
+    path = malloc(sizeof(char) * (256));
+    memcpy(path, SERVER_DIR, strlen(SERVER_DIR));
+    strcat(path, topic); strcat(path, "_"); strcat(path, clientId);
+    path[strlen(SERVER_DIR) + topicLen + 1 + ID_LEN] = '\0';
+    return path; 
+}
+
+void createTopicWatcherForSubscriber(char *topic, int topicLen) {
+    int sockfd;
+    struct sockaddr_un subscriberaddr;
+    char *watcherPath;
+
+    if ((sockfd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0)) < 0)
+        perror("Error on sub sock: \n");
+
+    watcherPath = getSubscriberWatcherPath(topic, topicLen);
+    unlink(watcherPath);
+
+    bzero(&subscriberaddr, sizeof(subscriberaddr));
+    subscriberaddr.sun_family = AF_UNIX;
+    strncpy(subscriberaddr.sun_path, watcherPath, strlen(watcherPath));
+
+    if (bind(sockfd, (struct sockaddr *) &subscriberaddr, sizeof(subscriberaddr)) == -1)
+        perror("Error on sub bind: \n");
+
+    if (listen(sockfd, 20) == -1)
+        printf("Error on sub listen: \n");
+    printf("Socket created !\n");
 }
 
 void formatSubackResponse(short int messageIdentifier) {
@@ -239,6 +276,7 @@ void handleSubscribeRequest(char *packet) {
     strncpy(topic, packet + TOPIC_POS, topicLen); topic[topicLen] = '\0';
 
     printf("topic '%s', message identifier %d\n", topic, messageIdentifier);
+    createTopicWatcherForSubscriber(topic, topicLen);
     formatSubackResponse(messageIdentifier);
 }
 

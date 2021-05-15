@@ -41,6 +41,9 @@
 #include <unistd.h>
 
 #include <fcntl.h>
+#include <dirent.h>
+#include <sys/un.h>
+
 
 #define LISTENQ 1
 #define MAXDATASIZE 100
@@ -78,11 +81,12 @@ struct mqttResponsePacket {
     int packetLength;
 };
 
-struct mqttPacketFixedHeader *currentPacketInfo;
+struct mqttPacketFixedHeader currentPacketInfo;
+struct mqttResponsePacket response;
 
 void getPacketInfo(char headerFirstByte, char headerSecondByte) {
-    currentPacketInfo->packetType = (uint8_t) headerFirstByte >> 4;
-    currentPacketInfo->remainingLength = (uint8_t) headerSecondByte;
+    currentPacketInfo.packetType = (uint8_t) headerFirstByte >> 4;
+    currentPacketInfo.remainingLength = (uint8_t) headerSecondByte;
 }
 
 char *generateClientId(){
@@ -97,7 +101,7 @@ char *generateClientId(){
     return id;
 }
 
-struct mqttResponsePacket *formatConnackResponse() {
+void formatConnackResponse() {
     enum connackPacketBytesDisposition {
         ACK_FLAGS_POS = 2,
         REASON_CODE_POS,
@@ -111,7 +115,6 @@ struct mqttResponsePacket *formatConnackResponse() {
         ASSIGN_CLIENT_IDENTIFIER_CODE = 0x12, 
         PROPERTIES_LEN = 3 + ID_LEN, PACKET_LEN = 2 + 2 + 1 + PROPERTIES_LEN;
     char packet[PACKET_LEN];
-    struct mqttResponsePacket *response;
 
     // Fixed header do pacote de tipo CONNACK 
     packet[PACKET_TYPE] = CONNACK << 4;
@@ -127,19 +130,47 @@ struct mqttResponsePacket *formatConnackResponse() {
     packet[ID_LEN_POS_1] = 0; packet[ID_LEN_POS_2] = ID_LEN;
     strncpy(packet + ID_POS, generateClientId(), ID_LEN);
 
-    response = malloc(sizeof(struct mqttResponsePacket));
-    response->packet = packet; response->packetLength = PACKET_LEN;
-    return response;
+    response.packet = packet; response.packetLength = PACKET_LEN;
 }
 
-struct mqttResponsePacket *handleConnectRequest(char *packet) {
+void handleConnectRequest(char *packet) {
     char protocolName[4];
     int protocolVersion;
 
     strncpy(protocolName, packet + 4, sizeof(protocolName));
     protocolVersion = (int) packet[8];
     printf("protocol %s version %d\n", protocolName, protocolVersion);
-    return formatConnackResponse();
+    formatConnackResponse();
+}
+
+void sentMessageToSubscribers(char *message, int messageLen, char *topic, int topicLen) {
+    DIR *serverDir;
+    struct dirent *currentFile;
+    int sockfd;
+    struct sockaddr_un subscriberaddr;
+
+    serverDir = opendir("/tmp/mqtt-server");
+    if (serverDir) {
+        while ((currentFile = readdir(serverDir)) != NULL) {
+            if (strncmp(currentFile->d_name, topic, topicLen) == 0) {
+                printf("file: %s\n", currentFile->d_name);
+                
+                // if ((sockfd = socket(AF_LOCAL, SOCK_STREAM, 0)) < 0)
+                //     continue;
+                
+                // bzero(&subscriberaddr, sizeof(subscriberaddr));
+                // subscriberaddr.sun_family = AF_UNIX;
+                // strncpy(subscriberaddr.sun_path, SOCKET_FILE,
+                //         sizeof(subscriberaddr.sun_path) - 1);
+
+                // if (connect(sockfd, (struct sockaddr *) &subscriberaddr, sizeof(subscriberaddr)) < 0)
+                //     continue;
+
+                // write(sockfd, message, messageLen);
+            }
+        }
+        closedir(serverDir);
+    }
 }
 
 void handlePublishRequest(char *packet) {
@@ -155,15 +186,16 @@ void handlePublishRequest(char *packet) {
     topic = malloc(sizeof(char) * (topicLen + 1));
     strncpy(topic, packet + TOPIC_POS, topicLen); topic[topicLen] = '\0';
 
-    messageLen = currentPacketInfo->remainingLength - 2 - topicLen - 1; 
+    messageLen = currentPacketInfo.remainingLength - 2 - topicLen - 1; 
     message = malloc(sizeof(char) * (messageLen + 1));
-    messagePos = currentPacketInfo->remainingLength - messageLen + 2;
+    messagePos = currentPacketInfo.remainingLength - messageLen + 2;
     strncpy(message, packet + messagePos, messageLen); message[messageLen] = '\0';
 
     printf("topic '%s', message len %d and message '%s' and messagePos %d \n", topic, messageLen, message, messagePos);
+    sentMessageToSubscribers(message, messageLen, topic, topicLen);
 }
 
-struct mqttResponsePacket *formatSubackResponse(short int messageIdentifier) {
+void formatSubackResponse(short int messageIdentifier) {
     enum subackPacketBytesDisposition {
         MSG_IDENTIFIER_POS_1 = 2,
         MSG_IDENTIFIER_POS_2,
@@ -172,7 +204,6 @@ struct mqttResponsePacket *formatSubackResponse(short int messageIdentifier) {
     };
     const int SUCCESS_REASON_CODE = 0x00, PACKET_LEN = 6;
     char packet[PACKET_LEN];
-    struct mqttResponsePacket *response;
 
     // Fixed header do pacote de tipo SUBACK 
     packet[PACKET_TYPE] = SUBACK << 4;
@@ -186,12 +217,10 @@ struct mqttResponsePacket *formatSubackResponse(short int messageIdentifier) {
     // Payload do pacote de tipo SUBACK
     packet[REASON_CODE_POS] = SUCCESS_REASON_CODE;
 
-    response = malloc(sizeof(struct mqttResponsePacket));
-    response->packet = packet; response->packetLength = PACKET_LEN;
-    return response;
+    response.packet = packet; response.packetLength = PACKET_LEN;
 }
 
-struct mqttResponsePacket *handleSubscribeRequest(char *packet) {
+void handleSubscribeRequest(char *packet) {
     enum subscribePacketBytesDisposition {
         MSG_IDENTIFIER_POS_1 = 2,
         MSG_IDENTIFIER_POS_2,
@@ -210,20 +239,17 @@ struct mqttResponsePacket *handleSubscribeRequest(char *packet) {
     strncpy(topic, packet + TOPIC_POS, topicLen); topic[topicLen] = '\0';
 
     printf("topic '%s', message identifier %d\n", topic, messageIdentifier);
-    return formatSubackResponse(messageIdentifier);
+    formatSubackResponse(messageIdentifier);
 }
 
-struct mqttResponsePacket *handlePingRequest() {
-    struct mqttResponsePacket *response;
+void handlePingRequest() {
     char packet[2];
 
     // Fixed header do pacote de tipo PINGRESP 
     packet[PACKET_TYPE] = PINGRESP << 4;
     packet[PACKET_REM_LEN] = 0;
 
-    response = malloc(sizeof(struct mqttResponsePacket));
-    response->packet = packet; response->packetLength = 2;
-    return response;
+    response.packet = packet; response.packetLength = 2;
 }
 
 int main (int argc, char **argv) {
@@ -335,10 +361,7 @@ int main (int argc, char **argv) {
             /* ========================================================= */
             /* ========================================================= */
             /* TODO: É esta parte do código que terá que ser modificada
-             * para que este servidor consiga interpretar comandos MQTT  */
-            struct mqttResponsePacket *response;
-            currentPacketInfo = malloc(sizeof(struct mqttPacketFixedHeader));
-            
+             * para que este servidor consiga interpretar comandos MQTT  */            
             int flags = fcntl(connfd, F_GETFL, 0); fcntl(connfd, F_SETFL, flags | O_NONBLOCK);
             int isClientConnected = 1;
 
@@ -347,9 +370,10 @@ int main (int argc, char **argv) {
                     getPacketInfo(recvline[PACKET_TYPE], recvline[PACKET_REM_LEN]);
                     recvline[n]=0;
 
-                    switch (currentPacketInfo->packetType) {
+                    switch (currentPacketInfo.packetType) {
                         case CONNECT:
-                            response = handleConnectRequest(recvline);
+                            handleConnectRequest(recvline);
+                            write(connfd, response.packet, response.packetLength);
                             break;
 
                         case PUBLISH:
@@ -357,21 +381,19 @@ int main (int argc, char **argv) {
                             break;
 
                         case SUBSCRIBE:
-                            response = handleSubscribeRequest(recvline);
+                            handleSubscribeRequest(recvline);
+                            write(connfd, response.packet, response.packetLength);
                             break;
 
                         case PINGREQ:
-                            response = handlePingRequest();
+                            handlePingRequest();
+                            write(connfd, response.packet, response.packetLength);
                             break;
 
                         case DISCONNECT:
                             isClientConnected = 0;
                             break;
 
-                    }
-                    if (response != NULL) {
-                        write(connfd, response->packet, response->packetLength);
-                        free(response);
                     }
                 }
             }

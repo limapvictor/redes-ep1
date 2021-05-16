@@ -149,21 +149,26 @@ void handleConnectRequest(char *packet) {
 
     strncpy(protocolName, &packet[4], sizeof(protocolName));
     protocolVersion = (uint8_t) packet[8];
-    printf("protocol %s version %d\n", protocolName, protocolVersion);
+    printf("Client using protocol %s version %d\n", protocolName, protocolVersion);
     formatConnackResponse();
 }
 
-void sentMessageToSubscribers(char *message, int messageLen, char *topic, int topicLen) {
+void sentMessageToSubscribers(char *message, int messageLen, char *topic) {
     DIR *serverDir;
     struct dirent *currentFile;
     int sockfd;
     struct sockaddr_un subscriberaddr;
-    char subscriberPath[MAXPATH + 1];
+    char subscriberPath[MAXPATH + 1], subscriberTopic[MAXPATH + 1];
+    short int subscriberPathLen, subscriberTopicLen;
 
     serverDir = opendir(SERVER_DIR);
     if (serverDir) {
         while ((currentFile = readdir(serverDir)) != NULL) {
-            if (strncmp(currentFile->d_name, topic, topicLen) == 0) {
+            subscriberPathLen = strlen(currentFile->d_name);
+            subscriberTopicLen = subscriberPathLen - 1 - ID_LEN;
+            strncpy(subscriberTopic, currentFile->d_name, subscriberTopicLen); subscriberTopic[subscriberTopicLen] = '\0';
+
+            if (strcmp(subscriberTopic, topic) == 0) {
                 if ((sockfd = socket(AF_LOCAL, SOCK_STREAM, 0)) < 0)
                     continue;
                 
@@ -171,13 +176,15 @@ void sentMessageToSubscribers(char *message, int messageLen, char *topic, int to
                 subscriberaddr.sun_family = AF_UNIX;
                 memcpy(subscriberPath, SERVER_DIR, strlen(SERVER_DIR) + 1); 
                 strcat(subscriberPath, currentFile->d_name); 
-                subscriberPath[strlen(SERVER_DIR) + strlen(currentFile->d_name)] = '\0';
+                subscriberPath[strlen(SERVER_DIR) + subscriberPathLen] = '\0';
                 strncpy(subscriberaddr.sun_path, subscriberPath, strlen(subscriberPath));
 
                 if (connect(sockfd, (struct sockaddr *) &subscriberaddr, sizeof(subscriberaddr)) < 0)
                     continue;
 
                 write(sockfd, message, messageLen);
+
+                close(sockfd);
             }
         }
         closedir(serverDir);
@@ -205,8 +212,7 @@ void handlePublishRequest(char *packet) {
     message = malloc(sizeof(char) * (messageLen + 1));
     strncpy(message, &packet[messagePos], messageLen); message[messageLen] = '\0';
 
-    printf("topic '%s', message len %d and message '%s' and messagePos %d \n", topic, messageLen, message, messagePos);
-    sentMessageToSubscribers(message, messageLen, topic, topicLen);
+    sentMessageToSubscribers(message, messageLen, topic);
 }
 
 char *getSubscriberWatcherPath(char *topic, int topicLen) {
@@ -237,8 +243,7 @@ void createTopicWatcherForSubscriber(char *topic, int topicLen) {
         perror("Error on sub bind: \n");
 
     if (listen(subscriberfd, 20) == -1)
-        printf("Error on sub listen: \n");
-    printf("Socket created !\n");
+        perror("Error on sub listen: \n");
 }
 
 void formatSubackResponse(short int messageIdentifier) {
@@ -289,7 +294,6 @@ void handleSubscribeRequest(char *packet) {
     strncpy(topic, &packet[TOPIC_POS], topicLen); topic[topicLen] = '\0';
     subscribedTopic = topic;
 
-    printf("topic '%s' with '%d bytes, message identifier %d\n", topic, topicLen, messageIdentifier);
     createTopicWatcherForSubscriber(topic, topicLen);
     formatSubackResponse(messageIdentifier);
 }
@@ -317,7 +321,6 @@ void formatPublishResponse(char message[]) {
     packetLen = MESSAGE_POS + messageLen;
     packet[PACKET_TYPE_POS] = PUBLISH << 4;
     packet[PACKET_REM_LEN_POS] = packetLen - 2;
-    printf("message in packet with %d: %d bytes as %s\n", packetLen, messageLen, message);
 
     response.packet = packet; response.packetLength = packetLen;
 }

@@ -49,10 +49,11 @@
 #define MAXDATASIZE 100
 #define MAXLINE 4096
 
-#define PACKET_TYPE 0
-#define PACKET_REM_LEN 1
+#define PACKET_TYPE_POS 0
+#define PACKET_REM_LEN_POS 1
 
 #define ID_LEN 10
+#define MAXPATH 256
 
 const char SERVER_DIR[] = "/tmp/mqtt-server/";
 
@@ -119,12 +120,13 @@ void formatConnackResponse() {
     };
     const int SUCCESS_REASON_CODE = 0x00, SUCCESS_ACK_FLAGS = 0, 
         ASSIGN_CLIENT_IDENTIFIER_CODE = 0x12, 
-        PROPERTIES_LEN = 3 + ID_LEN, PACKET_LEN = 2 + 2 + 1 + PROPERTIES_LEN;
+        PROPERTIES_LEN = 3 + ID_LEN, PACKET_LEN = ID_POS + ID_LEN;
+    short int idLenNet;
     char packet[PACKET_LEN];
 
     // Fixed header do pacote de tipo CONNACK 
-    packet[PACKET_TYPE] = CONNACK << 4;
-    packet[PACKET_REM_LEN] = PACKET_LEN - 2;
+    packet[PACKET_TYPE_POS] = CONNACK << 4;
+    packet[PACKET_REM_LEN_POS] = PACKET_LEN - 2;
 
     // Variable header do pacote de tipo CONNACK
     packet[ACK_FLAGS_POS] = SUCCESS_ACK_FLAGS;
@@ -133,19 +135,20 @@ void formatConnackResponse() {
     // Properties do pacote do tipo CONNACK
     packet[PROPERTIES_LEN_POS] = PROPERTIES_LEN;
     packet[ASSIGN_CLIENT_IDENTIFIER_POS] = ASSIGN_CLIENT_IDENTIFIER_CODE;
-    packet[ID_LEN_POS_1] = 0; packet[ID_LEN_POS_2] = ID_LEN;
+    idLenNet = htons(ID_LEN); 
+    memcpy(&packet[ID_LEN_POS_1], &idLenNet, 2);
     clientId = generateClientId();
-    strncpy(packet + ID_POS, clientId, ID_LEN);
+    strncpy(&packet[ID_POS], clientId, ID_LEN);
 
     response.packet = packet; response.packetLength = PACKET_LEN;
 }
 
 void handleConnectRequest(char *packet) {
     char protocolName[4];
-    int protocolVersion;
+    uint8_t protocolVersion;
 
-    strncpy(protocolName, packet + 4, sizeof(protocolName));
-    protocolVersion = (int) packet[8];
+    strncpy(protocolName, &packet[4], sizeof(protocolName));
+    protocolVersion = (uint8_t) packet[8];
     printf("protocol %s version %d\n", protocolName, protocolVersion);
     formatConnackResponse();
 }
@@ -155,7 +158,7 @@ void sentMessageToSubscribers(char *message, int messageLen, char *topic, int to
     struct dirent *currentFile;
     int sockfd;
     struct sockaddr_un subscriberaddr;
-    char subscriberPath[256];
+    char subscriberPath[MAXPATH + 1];
 
     serverDir = opendir(SERVER_DIR);
     if (serverDir) {
@@ -166,7 +169,8 @@ void sentMessageToSubscribers(char *message, int messageLen, char *topic, int to
                 
                 bzero(&subscriberaddr, sizeof(subscriberaddr));
                 subscriberaddr.sun_family = AF_UNIX;
-                memcpy(subscriberPath, SERVER_DIR, strlen(SERVER_DIR) + 1); strcat(subscriberPath, currentFile->d_name); 
+                memcpy(subscriberPath, SERVER_DIR, strlen(SERVER_DIR) + 1); 
+                strcat(subscriberPath, currentFile->d_name); 
                 subscriberPath[strlen(SERVER_DIR) + strlen(currentFile->d_name)] = '\0';
                 strncpy(subscriberaddr.sun_path, subscriberPath, strlen(subscriberPath));
 
@@ -186,17 +190,20 @@ void handlePublishRequest(char *packet) {
         TOPIC_LEN_POS_2,
         TOPIC_POS,
     };
-    int topicLen, messageLen, messagePos;
+    short int topicLen, messageLen, messagePos;
     char *topic, *message;
 
-    topicLen = (int)packet[TOPIC_LEN_POS_1] + (int)packet[TOPIC_LEN_POS_2];
+    //Decifrando topic do pacote do tipo PUBLISH
+    memcpy(&topicLen, &packet[TOPIC_LEN_POS_1], 2);
+    topicLen = ntohs(topicLen);
     topic = malloc(sizeof(char) * (topicLen + 1));
-    strncpy(topic, packet + TOPIC_POS, topicLen); topic[topicLen] = '\0';
+    strncpy(topic, &packet[TOPIC_POS], topicLen); topic[topicLen] = '\0';
 
-    messageLen = currentPacketInfo.remainingLength - 2 - topicLen - 1; 
+    //Decifrando message do pacote do tipo PUBLISH
+    messagePos = TOPIC_POS + topicLen + 1;
+    messageLen = currentPacketInfo.remainingLength - messagePos + 2; 
     message = malloc(sizeof(char) * (messageLen + 1));
-    messagePos = currentPacketInfo.remainingLength - messageLen + 2;
-    strncpy(message, packet + messagePos, messageLen); message[messageLen] = '\0';
+    strncpy(message, &packet[messagePos], messageLen); message[messageLen] = '\0';
 
     printf("topic '%s', message len %d and message '%s' and messagePos %d \n", topic, messageLen, message, messagePos);
     sentMessageToSubscribers(message, messageLen, topic, topicLen);
@@ -205,7 +212,7 @@ void handlePublishRequest(char *packet) {
 char *getSubscriberWatcherPath(char *topic, int topicLen) {
     char *path;
 
-    path = malloc(sizeof(char) * (256));
+    path = malloc(sizeof(char) * (MAXPATH + 1));
     memcpy(path, SERVER_DIR, strlen(SERVER_DIR));
     strcat(path, topic); strcat(path, "_"); strcat(path, clientId);
     path[strlen(SERVER_DIR) + topicLen + 1 + ID_LEN] = '\0';
@@ -241,16 +248,16 @@ void formatSubackResponse(short int messageIdentifier) {
         PROPERTIES_LEN_POS,
         REASON_CODE_POS,
     };
-    const int SUCCESS_REASON_CODE = 0x00, PACKET_LEN = 6;
+    const int SUCCESS_REASON_CODE = 0x00, PACKET_LEN = REASON_CODE_POS + 1;
     char packet[PACKET_LEN];
 
     // Fixed header do pacote de tipo SUBACK 
-    packet[PACKET_TYPE] = SUBACK << 4;
-    packet[PACKET_REM_LEN] = PACKET_LEN - 2;
+    packet[PACKET_TYPE_POS] = SUBACK << 4;
+    packet[PACKET_REM_LEN_POS] = PACKET_LEN - 2;
 
     // Variable header do pacote de tipo SUBACK
     messageIdentifier = htons(messageIdentifier);
-    memcpy(packet + MSG_IDENTIFIER_POS_1, (void *) &messageIdentifier, 2);
+    memcpy(&packet[MSG_IDENTIFIER_POS_1], &messageIdentifier, 2);
     packet[PROPERTIES_LEN_POS] = 0;
 
     // Payload do pacote de tipo SUBACK
@@ -268,17 +275,21 @@ void handleSubscribeRequest(char *packet) {
         TOPIC_LEN_POS_2,
         TOPIC_POS,
     };
-    int topicLen, messageIdentifier;
+    short int topicLen, messageIdentifier;
     char *topic;
 
-    messageIdentifier = (int)packet[MSG_IDENTIFIER_POS_1] + (int)packet[MSG_IDENTIFIER_POS_2];
+    //Decifrando message identifier do pacote do tipo SUBSCRIBE
+    memcpy(&messageIdentifier, &packet[MSG_IDENTIFIER_POS_1], 2);
+    messageIdentifier = ntohs(messageIdentifier);
     
-    topicLen = (int)packet[TOPIC_LEN_POS_1] + (int)packet[TOPIC_LEN_POS_2];
+    //Decifrando topic do pacote do tipo SUBSCRIBE
+    memcpy(&topicLen, &packet[TOPIC_LEN_POS_1], 2);
+    topicLen = ntohs(topicLen);
     topic = malloc(sizeof(char) * (topicLen + 1));
-    strncpy(topic, packet + TOPIC_POS, topicLen); topic[topicLen] = '\0';
+    strncpy(topic, &packet[TOPIC_POS], topicLen); topic[topicLen] = '\0';
     subscribedTopic = topic;
 
-    printf("topic '%s', message identifier %d\n", topic, messageIdentifier);
+    printf("topic '%s' with '%d bytes, message identifier %d\n", topic, topicLen, messageIdentifier);
     createTopicWatcherForSubscriber(topic, topicLen);
     formatSubackResponse(messageIdentifier);
 }
@@ -289,6 +300,7 @@ void formatPublishResponse(char message[]) {
     int PROPERTIES_LEN_POS, MESSAGE_POS;
     short int topicLen, topicLenNet, messageLen, packetLen;
 
+    //Variable header com o topic do pacote de tipo PUBLISH
     topicLen = strlen(subscribedTopic); topicLenNet = htons(topicLen);
     memcpy(&packet[TOPIC_LEN_POS_1], &topicLenNet, 2);
     memcpy(&packet[TOPIC_POS], subscribedTopic, topicLen);
@@ -296,13 +308,15 @@ void formatPublishResponse(char message[]) {
     PROPERTIES_LEN_POS = TOPIC_POS + topicLen;
     packet[PROPERTIES_LEN_POS] = 0;
 
+    //Payload com a message do pacote de tipo PUBLISH
     MESSAGE_POS = PROPERTIES_LEN_POS + 1;
     messageLen = strlen(message);
     strncpy(&packet[MESSAGE_POS], message, messageLen);
 
+    //Fixed header do pacote de tipo PUBLISH
     packetLen = MESSAGE_POS + messageLen;
-    packet[PACKET_TYPE] = PUBLISH << 4;
-    packet[PACKET_REM_LEN] = packetLen - 2;
+    packet[PACKET_TYPE_POS] = PUBLISH << 4;
+    packet[PACKET_REM_LEN_POS] = packetLen - 2;
     printf("message in packet with %d: %d bytes as %s\n", packetLen, messageLen, message);
 
     response.packet = packet; response.packetLength = packetLen;
@@ -327,8 +341,8 @@ void handlePingRequest() {
     char packet[2];
 
     // Fixed header do pacote de tipo PINGRESP 
-    packet[PACKET_TYPE] = PINGRESP << 4;
-    packet[PACKET_REM_LEN] = 0;
+    packet[PACKET_TYPE_POS] = PINGRESP << 4;
+    packet[PACKET_REM_LEN_POS] = 0;
 
     response.packet = packet; response.packetLength = 2;
 }
@@ -448,7 +462,7 @@ int main (int argc, char **argv) {
 
             while (isClientConnected) {
                 if ((n=read(connfd, recvline, MAXLINE)) > 0) {
-                    getPacketInfo(recvline[PACKET_TYPE], recvline[PACKET_REM_LEN]);
+                    getPacketInfo(recvline[PACKET_TYPE_POS], recvline[PACKET_REM_LEN_POS]);
                     recvline[n]=0;
 
                     switch (currentPacketInfo.packetType) {

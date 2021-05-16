@@ -347,6 +347,13 @@ void handlePingRequest() {
     response.packet = packet; response.packetLength = 2;
 }
 
+void handleDisconnectRequest(short int isSubscriber) {
+    if (isSubscriber) {
+        close(subscriberfd);
+        unlink(getSubscriberWatcherPath(subscribedTopic, strlen(subscribedTopic)));
+    }
+}
+
 int main (int argc, char **argv) {
     /* Os sockets. Um que será o socket que vai escutar pelas conexões
      * e o outro que vai ser o socket específico de cada conexão */
@@ -458,7 +465,7 @@ int main (int argc, char **argv) {
             /* TODO: É esta parte do código que terá que ser modificada
              * para que este servidor consiga interpretar comandos MQTT  */            
             int flags = fcntl(connfd, F_GETFL, 0); fcntl(connfd, F_SETFL, flags | O_NONBLOCK);
-            int isClientConnected = 1, isSubscriber = 0;
+            short int isClientConnected = 1, isSubscriber = 0;
 
             while (isClientConnected) {
                 if ((n=read(connfd, recvline, MAXLINE)) > 0) {
@@ -487,6 +494,7 @@ int main (int argc, char **argv) {
                             break;
 
                         case DISCONNECT:
+                            handleDisconnectRequest(isSubscriber);
                             isClientConnected = 0;
                             break;
 

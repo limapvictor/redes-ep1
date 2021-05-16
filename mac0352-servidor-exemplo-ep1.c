@@ -87,6 +87,9 @@ struct mqttPacketFixedHeader currentPacketInfo;
 struct mqttResponsePacket response;
 char *clientId;
 
+int subscriberfd;
+char *subscribedTopic;
+
 void getPacketInfo(char headerFirstByte, char headerSecondByte) {
     currentPacketInfo.packetType = (uint8_t) headerFirstByte >> 4;
     currentPacketInfo.remainingLength = (uint8_t) headerSecondByte;
@@ -152,25 +155,25 @@ void sentMessageToSubscribers(char *message, int messageLen, char *topic, int to
     struct dirent *currentFile;
     int sockfd;
     struct sockaddr_un subscriberaddr;
+    char subscriberPath[256];
 
     serverDir = opendir(SERVER_DIR);
     if (serverDir) {
         while ((currentFile = readdir(serverDir)) != NULL) {
             if (strncmp(currentFile->d_name, topic, topicLen) == 0) {
-                printf("file: %s\n", currentFile->d_name);
+                if ((sockfd = socket(AF_LOCAL, SOCK_STREAM, 0)) < 0)
+                    continue;
                 
-                // if ((sockfd = socket(AF_LOCAL, SOCK_STREAM, 0)) < 0)
-                //     continue;
-                
-                // bzero(&subscriberaddr, sizeof(subscriberaddr));
-                // subscriberaddr.sun_family = AF_UNIX;
-                // strncpy(subscriberaddr.sun_path, SOCKET_FILE,
-                //         sizeof(subscriberaddr.sun_path) - 1);
+                bzero(&subscriberaddr, sizeof(subscriberaddr));
+                subscriberaddr.sun_family = AF_UNIX;
+                memcpy(subscriberPath, SERVER_DIR, strlen(SERVER_DIR) + 1); strcat(subscriberPath, currentFile->d_name); 
+                subscriberPath[strlen(SERVER_DIR) + strlen(currentFile->d_name)] = '\0';
+                strncpy(subscriberaddr.sun_path, subscriberPath, strlen(subscriberPath));
 
-                // if (connect(sockfd, (struct sockaddr *) &subscriberaddr, sizeof(subscriberaddr)) < 0)
-                //     continue;
+                if (connect(sockfd, (struct sockaddr *) &subscriberaddr, sizeof(subscriberaddr)) < 0)
+                    continue;
 
-                // write(sockfd, message, messageLen);
+                write(sockfd, message, messageLen);
             }
         }
         closedir(serverDir);
@@ -210,11 +213,10 @@ char *getSubscriberWatcherPath(char *topic, int topicLen) {
 }
 
 void createTopicWatcherForSubscriber(char *topic, int topicLen) {
-    int sockfd;
     struct sockaddr_un subscriberaddr;
     char *watcherPath;
 
-    if ((sockfd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0)) < 0)
+    if ((subscriberfd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0)) < 0)
         perror("Error on sub sock: \n");
 
     watcherPath = getSubscriberWatcherPath(topic, topicLen);
@@ -224,10 +226,10 @@ void createTopicWatcherForSubscriber(char *topic, int topicLen) {
     subscriberaddr.sun_family = AF_UNIX;
     strncpy(subscriberaddr.sun_path, watcherPath, strlen(watcherPath));
 
-    if (bind(sockfd, (struct sockaddr *) &subscriberaddr, sizeof(subscriberaddr)) == -1)
+    if (bind(subscriberfd, (struct sockaddr *) &subscriberaddr, sizeof(subscriberaddr)) == -1)
         perror("Error on sub bind: \n");
 
-    if (listen(sockfd, 20) == -1)
+    if (listen(subscriberfd, 20) == -1)
         printf("Error on sub listen: \n");
     printf("Socket created !\n");
 }
@@ -274,10 +276,51 @@ void handleSubscribeRequest(char *packet) {
     topicLen = (int)packet[TOPIC_LEN_POS_1] + (int)packet[TOPIC_LEN_POS_2];
     topic = malloc(sizeof(char) * (topicLen + 1));
     strncpy(topic, packet + TOPIC_POS, topicLen); topic[topicLen] = '\0';
+    subscribedTopic = topic;
 
     printf("topic '%s', message identifier %d\n", topic, messageIdentifier);
     createTopicWatcherForSubscriber(topic, topicLen);
     formatSubackResponse(messageIdentifier);
+}
+
+void formatPublishResponse(char message[]) {
+    char packet[MAXLINE + 1];
+    const int TOPIC_LEN_POS_1 = 2, TOPIC_POS = 4; 
+    int PROPERTIES_LEN_POS, MESSAGE_POS;
+    short int topicLen, topicLenNet, messageLen, packetLen;
+
+    topicLen = strlen(subscribedTopic); topicLenNet = htons(topicLen);
+    memcpy(&packet[TOPIC_LEN_POS_1], &topicLenNet, 2);
+    memcpy(&packet[TOPIC_POS], subscribedTopic, topicLen);
+
+    PROPERTIES_LEN_POS = TOPIC_POS + topicLen;
+    packet[PROPERTIES_LEN_POS] = 0;
+
+    MESSAGE_POS = PROPERTIES_LEN_POS + 1;
+    messageLen = strlen(message);
+    strncpy(&packet[MESSAGE_POS], message, messageLen);
+
+    packetLen = MESSAGE_POS + messageLen;
+    packet[PACKET_TYPE] = PUBLISH << 4;
+    packet[PACKET_REM_LEN] = packetLen - 2;
+    printf("message in packet with %d: %d bytes as %s\n", packetLen, messageLen, message);
+
+    response.packet = packet; response.packetLength = packetLen;
+}
+
+void getNewMessageFromTopic(int subscriberClientfd) {
+    int connfd;
+    char message[MAXLINE + 1];
+    ssize_t n;
+
+    if ((connfd = accept(subscriberfd, (struct sockaddr *) NULL, NULL)) >= 0) {
+        if ((n=read(connfd, message, MAXLINE)) > 0) {
+            message[n] = '\0';
+            formatPublishResponse(message);
+            write(subscriberClientfd, response.packet, response.packetLength);
+        }
+        close(connfd);
+    }
 }
 
 void handlePingRequest() {
@@ -401,7 +444,7 @@ int main (int argc, char **argv) {
             /* TODO: É esta parte do código que terá que ser modificada
              * para que este servidor consiga interpretar comandos MQTT  */            
             int flags = fcntl(connfd, F_GETFL, 0); fcntl(connfd, F_SETFL, flags | O_NONBLOCK);
-            int isClientConnected = 1;
+            int isClientConnected = 1, isSubscriber = 0;
 
             while (isClientConnected) {
                 if ((n=read(connfd, recvline, MAXLINE)) > 0) {
@@ -420,6 +463,7 @@ int main (int argc, char **argv) {
 
                         case SUBSCRIBE:
                             handleSubscribeRequest(recvline);
+                            isSubscriber = 1;
                             write(connfd, response.packet, response.packetLength);
                             break;
 
@@ -434,6 +478,9 @@ int main (int argc, char **argv) {
 
                     }
                 }
+
+                if (isSubscriber) 
+                    getNewMessageFromTopic(connfd);
             }
             /* ========================================================= */
             /* ========================================================= */

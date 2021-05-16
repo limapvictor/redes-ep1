@@ -43,7 +43,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/un.h>
-
+#include <sys/stat.h>
 
 #define LISTENQ 1
 #define MAXDATASIZE 100
@@ -415,7 +415,7 @@ int main (int argc, char **argv) {
 
     printf("[Servidor no ar. Aguardando conexões na porta %s]\n",argv[1]);
     printf("[Para finalizar, pressione CTRL+c ou rode um kill ou killall]\n");
-   
+    mkdir(SERVER_DIR, 0777);
     /* O servidor no final das contas é um loop infinito de espera por
      * conexões e processamento de cada uma individualmente */
 	for (;;) {
@@ -522,5 +522,7 @@ int main (int argc, char **argv) {
              * pelo processo filho) */
             close(connfd);
     }
+    if (rmdir(SERVER_DIR) < 0)
+        perror("rmdir :(\n");
     exit(0);
 }
